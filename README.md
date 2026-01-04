@@ -148,3 +148,7 @@ This project is intended only for educational and lawful use on systems you own 
 
 Stay ethical. Learn responsibly.
 Cybersecurity is about protection — not harm.
+
+📜 License
+
+This project is licensed under the MIT License.
