@@ -64,7 +64,7 @@ def banner():
     console.print(
         Align.center(
             Panel(
-                "[bold red]⚠ DISCLAIMER ⚠[/bold red]\n"
+                "[bold red]         ⚠ DISCLAIMER ⚠[/bold red]\n"
                 f"[{THEME_COLOR}]This tool is strictly for lawful & educational purposes only.[/]",
                 border_style="red",
                 box=box.HEAVY
