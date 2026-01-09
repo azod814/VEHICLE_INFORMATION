@@ -2,7 +2,7 @@
 """
 VEHICLE_INFORMATION (AZOD08)
 Author : azod08
-License: MIT
+License : MIT
 Educational & Ethical Use Only
 """
 
@@ -21,10 +21,9 @@ from rich import box
 
 API_BASE = "https://vehicleinfobyterabaap.vercel.app/lookup"
 VERSION = "1.0"
-
 console = Console()
 
-# ------------------ UTILS ------------------
+# ---------------- BASIC ----------------
 
 def clear():
     os.system("cls" if os.name == "nt" else "clear")
@@ -40,51 +39,34 @@ def log(msg):
 def cache_file(rc):
     return f"cache/{hashlib.md5(rc.encode()).hexdigest()}.json"
 
-# ------------------ UI ------------------
+# ---------------- UI ----------------
 
 def banner():
     clear()
-
     console.print(
         Align.center(
             Panel(
                 f"VEHICLE INFORMATION SYSTEM\n"
                 f"Educational & Ethical Use Only\n\n"
-                f"Author : azod08   |   Version : {VERSION}",
+                f"Author : azod08 | Version : {VERSION}",
                 border_style="green",
                 box=box.DOUBLE
             )
         )
     )
 
-    console.print(
-        Align.center(
-            Panel(
-                "This tool is strictly for lawful & educational purposes only.",
-                border_style="red",
-                box=box.HEAVY
-            )
-        )
-    )
-
-# ------------------ CORE ------------------
+# ---------------- CORE ----------------
 
 def fetch_data(rc):
     cached = cache_file(rc)
-
     if os.path.exists(cached):
         with open(cached) as f:
             return json.load(f), True
 
     url = f"{API_BASE}?{urlencode({'rc': rc})}"
     start = time.time()
-
-    try:
-        r = requests.get(url, timeout=15)
-        data = r.json()
-    except Exception as e:
-        return {"error": str(e)}, False
-
+    r = requests.get(url, timeout=15)
+    data = r.json()
     data["_response_time_ms"] = round((time.time() - start) * 1000, 2)
 
     with open(cached, "w") as f:
@@ -92,107 +74,104 @@ def fetch_data(rc):
 
     return data, False
 
-# ------------------ DISPLAY ------------------
+# ---------------- DISPLAY ----------------
 
 def display(rc, data, cached):
 
-    if "error" in data:
-        console.print(
-            Align.center(
-                Panel(str(data["error"]), border_style="red", box=box.HEAVY)
-            )
-        )
-        return
-
-    # RC NUMBER PLATE
-    console.print("\n")
+    # RC INPUT RESULT (NUMBER PLATE)
     console.print(
         Align.center(
             Panel(
-                f"🚘  {rc.upper()}",
+                rc.upper(),
+                title="VEHICLE NUMBER",
                 border_style="green",
                 box=box.DOUBLE
             )
         )
     )
 
-    # STATUS BOX
-    console.print(
-        Align.center(
-            Panel(
-                f"Cached : {'YES' if cached else 'NO'}\n"
-                f"Response Time : {data.pop('_response_time_ms')} ms",
-                border_style="green"
-            )
-        )
-    )
-
-    # PERSONAL INFO (RIGHT SIDE)
-    personal_keys = [
-        "owner_name",
-        "father_name",
-        "mobile_no",
-        "address"
-    ]
-
-    personal_text = ""
-    for key in personal_keys:
-        if key in data:
-            personal_text += f"{key.replace('_',' ').upper()} : {data.pop(key)}\n"
-
-    personal_box = Panel(
-        personal_text.strip() if personal_text else "N/A",
-        title="PERSONAL INFORMATION",
+    # LEFT SIDE BOXES
+    address_box = Panel(
+        f"{data.get('address','N/A')}\n"
+        f"City : {data.get('city_name','N/A')}\n"
+        f"District : {data.get('district','N/A')}",
+        title="ADDRESS INFO",
         border_style="green",
         box=box.HEAVY
     )
 
-    # OTHER DATA (LEFT SIDE, MULTIPLE BOXES)
-    other_boxes = []
-    for k, v in data.items():
-        other_boxes.append(
-            Panel(
-                str(v),
-                title=k.replace("_", " ").upper(),
-                border_style="green"
-            )
-        )
+    personal_box = Panel(
+        f"Name : {data.get('owner_name','N/A')}\n"
+        f"Father : {data.get('father_name','N/A')}\n"
+        f"Mobile : {data.get('mobile_no','N/A')}",
+        title="PERSONAL INFO",
+        border_style="green",
+        box=box.HEAVY
+    )
 
-    left_column = Columns(other_boxes, expand=True, equal=True)
+    # CENTER BOXES
+    detail_box_1 = Panel(
+        f"Reg Date : {data.get('reg_date','N/A')}\n"
+        f"RTO : {data.get('rto','N/A')}\n"
+        f"State : {data.get('state','N/A')}",
+        title="DETAIL",
+        border_style="green"
+    )
 
-    # FINAL DASHBOARD LAYOUT
+    detail_box_2 = Panel(
+        f"Owner Type : {data.get('owner_type','N/A')}\n"
+        f"Class : {data.get('vehicle_class','N/A')}\n"
+        f"Status : {data.get('status','N/A')}",
+        title="DETAIL",
+        border_style="green"
+    )
+
+    # RIGHT SIDE BOXES
+    vehicle_box = Panel(
+        f"Type : {data.get('vehicle_type','N/A')}\n"
+        f"Fuel : {data.get('fuel_type','N/A')}\n"
+        f"Norms : {data.get('fuel_norms','N/A')}\n"
+        f"Fitness : {data.get('fitness_upto','N/A')}",
+        title="VEHICLE INFO",
+        border_style="green"
+    )
+
+    engine_box = Panel(
+        f"Engine : {data.get('engine_no','N/A')}\n"
+        f"Chassis : {data.get('chassis_no','N/A')}",
+        title="ENGINE / CHASSIS",
+        border_style="green"
+    )
+
+    # FINAL LAYOUT (DRAWING MATCH)
     console.print(
         Columns(
-            [left_column, personal_box],
+            [
+                Columns([address_box, personal_box]),
+                Columns([detail_box_1, detail_box_2]),
+                Columns([vehicle_box, engine_box]),
+            ],
             expand=True
         )
     )
 
-    # SAVE RESULT
     with open(f"results/{rc}.json", "w") as f:
         json.dump(data, f, indent=4)
 
-# ------------------ MAIN ------------------
+# ---------------- MAIN ----------------
 
 def main():
     ensure_dirs()
     banner()
 
-    rc = console.input("\n➜ Enter Vehicle RC Number : ").strip()
+    rc = console.input("\nEnter Vehicle RC Number : ").strip()
     if not rc:
         return
 
-    log(f"Lookup started for RC: {rc}")
+    log(f"Lookup started : {rc}")
     data, cached = fetch_data(rc)
     display(rc, data, cached)
-    log(f"Lookup finished for RC: {rc}")
-
-    console.print("\n")
-    console.print(
-        Align.center(
-            Panel("DONE", border_style="green")
-        )
-    )
+    log(f"Lookup finished : {rc}")
 
 if __name__ == "__main__":
     main()
