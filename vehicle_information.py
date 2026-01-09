@@ -8,7 +8,6 @@ Educational & Ethical Use Only
 """
 
 import os
-import sys
 import json
 import time
 import hashlib
@@ -23,6 +22,10 @@ from rich import box
 
 API_BASE = "https://vehicleinfobyterabaap.vercel.app/lookup"
 VERSION = "1.0"
+
+# Dark green theme color
+THEME_COLOR = "#0f9d58"
+
 console = Console()
 
 # ------------------ BASIC UTILS ------------------
@@ -41,26 +44,31 @@ def log(msg):
 def cache_file(rc):
     return f"cache/{hashlib.md5(rc.encode()).hexdigest()}.json"
 
-# ------------------ HACKER UI ------------------
+# ------------------ UI ------------------
 
 def banner():
     clear()
     console.print(
-        Panel.fit(
-            "[bold green]VEHICLE INFORMATION SYSTEM[/bold green]\n"
-            "[green]Educational & Ethical Use Only[/green]\n\n"
-            f"[bold]Author:[/bold] azod08   |   [bold]Version:[/bold] {VERSION}",
-            border_style="green",
-            box=box.DOUBLE
+        Align.center(
+            Panel.fit(
+                f"[bold {THEME_COLOR}]VEHICLE INFORMATION SYSTEM[/bold {THEME_COLOR}]\n"
+                f"[{THEME_COLOR}]Educational & Ethical Use Only[/]\n\n"
+                f"[bold {THEME_COLOR}]Author:[/] azod08   |   "
+                f"[bold {THEME_COLOR}]Version:[/] {VERSION}",
+                border_style=THEME_COLOR,
+                box=box.DOUBLE
+            )
         )
     )
 
     console.print(
-        Panel(
-            "[bold red]⚠ DISCLAIMER ⚠[/bold red]\n"
-            "[green]This tool is strictly for lawful & educational purposes only.[/green]",
-            border_style="red",
-            box=box.HEAVY
+        Align.center(
+            Panel(
+                "[bold red]⚠ DISCLAIMER ⚠[/bold red]\n"
+                f"[{THEME_COLOR}]This tool is strictly for lawful & educational purposes only.[/]",
+                border_style="red",
+                box=box.HEAVY
+            )
         )
     )
 
@@ -92,48 +100,48 @@ def display(rc, data, cached):
     if "error" in data:
         console.print(
             Panel(
-                f"[bold red]{data['error']}[/bold red]",
-                title="[red]ERROR[/red]",
+                data["error"],
+                title="ERROR",
                 border_style="red",
                 box=box.HEAVY
             )
         )
         return
 
-    # NUMBER PLATE STYLE RC DISPLAY
+    # NUMBER PLATE
     console.print(
         Align.center(
             Panel.fit(
-                f"[bold black on green]  🚘  {rc.upper()}  [/bold black on green]",
-                border_style="green",
+                f"🚘  {rc.upper()}",
+                border_style=THEME_COLOR,
                 box=box.DOUBLE
             )
         )
     )
 
     status = (
-        f"[green]Cached:[/green] {'YES' if cached else 'NO'}\n"
-        f"[green]Response Time:[/green] {data.pop('_response_time_ms')} ms"
+        f"Cached : {'YES' if cached else 'NO'}\n"
+        f"Response Time : {data.pop('_response_time_ms')} ms"
     )
 
     console.print(
         Panel(
             status,
-            title="[bold green]SYSTEM STATUS[/bold green]",
-            border_style="green",
+            title="SYSTEM STATUS",
+            border_style=THEME_COLOR,
             box=box.SQUARE
         )
     )
 
     table = Table(
-        title="[bold green]VEHICLE DATA OUTPUT[/bold green]",
+        title="VEHICLE DATA OUTPUT",
         box=box.HEAVY,
         show_lines=True,
-        border_style="green"
+        border_style=THEME_COLOR
     )
 
-    table.add_column("FIELD", style="bold green", no_wrap=True)
-    table.add_column("VALUE", style="bold white")
+    table.add_column("FIELD", style=f"bold {THEME_COLOR}", no_wrap=True)
+    table.add_column("VALUE", style="white")
 
     for k, v in data.items():
         table.add_row(
@@ -152,9 +160,13 @@ def main():
     ensure_dirs()
     banner()
 
-    rc = input("\n[bold green]➜ Enter Vehicle RC Number:[/bold green] ").strip()
+    # CLEAN INPUT (NO RAW MARKUP TEXT)
+    rc = console.input(
+        f"\n[{THEME_COLOR}]Enter Vehicle RC Number: ➜ [/]"
+    ).strip()
+
     if not rc:
-        console.print("[bold red]RC number is required.[/bold red]")
+        console.print("[red]RC number is required.[/red]")
         return
 
     log(f"Lookup started for RC: {rc}")
@@ -162,7 +174,7 @@ def main():
     display(rc, data, cached)
     log(f"Lookup finished for RC: {rc}")
 
-    console.print("\n[bold green]✔ DONE[/bold green]")
+    console.print(f"\n[bold {THEME_COLOR}]✔ DONE[/bold {THEME_COLOR}]")
 
 if __name__ == "__main__":
     main()
