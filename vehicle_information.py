@@ -41,24 +41,28 @@ def log(msg):
 def cache_file(rc):
     return f"cache/{hashlib.md5(rc.encode()).hexdigest()}.json"
 
-# ------------------ UI ------------------
+# ------------------ HACKER UI ------------------
 
 def banner():
-    console.rule("[bold cyan]VEHICLE INFORMATION (AZOD08)")
+    clear()
     console.print(
-        Align.center(
-            f"[bold]Professional Vehicle Lookup Tool[/bold]\nVersion: {VERSION}\nAuthor: azod08"
+        Panel.fit(
+            "[bold green]VEHICLE INFORMATION SYSTEM[/bold green]\n"
+            "[green]Educational & Ethical Use Only[/green]\n\n"
+            f"[bold]Author:[/bold] azod08   |   [bold]Version:[/bold] {VERSION}",
+            border_style="green",
+            box=box.DOUBLE
         )
     )
+
     console.print(
         Panel(
-            "This tool is strictly for educational and lawful use.\n"
-            "Unauthorized usage may be illegal.",
-            title="DISCLAIMER",
-            style="red",
+            "[bold red]⚠ DISCLAIMER ⚠[/bold red]\n"
+            "[green]This tool is strictly for lawful & educational purposes only.[/green]",
+            border_style="red",
+            box=box.HEAVY
         )
     )
-    console.rule()
 
 # ------------------ CORE LOGIC ------------------
 
@@ -86,23 +90,56 @@ def fetch_data(rc):
 
 def display(rc, data, cached):
     if "error" in data:
-        console.print(Panel(f"[red]{data['error']}[/red]", title="ERROR"))
+        console.print(
+            Panel(
+                f"[bold red]{data['error']}[/bold red]",
+                title="[red]ERROR[/red]",
+                border_style="red",
+                box=box.HEAVY
+            )
+        )
         return
 
-    status = f"Cached: {'YES' if cached else 'NO'}\nResponse Time: {data.pop('_response_time_ms')} ms"
-    console.print(Panel(status, title="STATUS", style="green"))
-
-    table = Table(
-        title=f"Vehicle Information — {rc}",
-        box=box.SQUARE,
-        show_lines=True
+    # NUMBER PLATE STYLE RC DISPLAY
+    console.print(
+        Align.center(
+            Panel.fit(
+                f"[bold black on green]  🚘  {rc.upper()}  [/bold black on green]",
+                border_style="green",
+                box=box.DOUBLE
+            )
+        )
     )
 
-    table.add_column("Field", style="cyan", no_wrap=True)
-    table.add_column("Value", style="white")
+    status = (
+        f"[green]Cached:[/green] {'YES' if cached else 'NO'}\n"
+        f"[green]Response Time:[/green] {data.pop('_response_time_ms')} ms"
+    )
+
+    console.print(
+        Panel(
+            status,
+            title="[bold green]SYSTEM STATUS[/bold green]",
+            border_style="green",
+            box=box.SQUARE
+        )
+    )
+
+    table = Table(
+        title="[bold green]VEHICLE DATA OUTPUT[/bold green]",
+        box=box.HEAVY,
+        show_lines=True,
+        border_style="green"
+    )
+
+    table.add_column("FIELD", style="bold green", no_wrap=True)
+    table.add_column("VALUE", style="bold white")
 
     for k, v in data.items():
-        table.add_row(k.replace("_", " ").title(), str(v))
+        table.add_row(
+            k.replace("_", " ").upper(),
+            str(v)
+        )
 
     console.print(table)
 
@@ -113,12 +150,11 @@ def display(rc, data, cached):
 
 def main():
     ensure_dirs()
-    clear()
     banner()
 
-    rc = input("\nEnter Vehicle RC Number: ").strip()
+    rc = input("\n[bold green]➜ Enter Vehicle RC Number:[/bold green] ").strip()
     if not rc:
-        console.print("[red]RC number is required.[/red]")
+        console.print("[bold red]RC number is required.[/bold red]")
         return
 
     log(f"Lookup started for RC: {rc}")
@@ -126,7 +162,7 @@ def main():
     display(rc, data, cached)
     log(f"Lookup finished for RC: {rc}")
 
-    console.print("\n[bold green]Done.[/bold green]")
+    console.print("\n[bold green]✔ DONE[/bold green]")
 
 if __name__ == "__main__":
     main()
