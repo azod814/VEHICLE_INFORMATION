@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VEHICLE_INFORMATION (AZOD08)
-Author : azod08
+VEHICLE_INFORMATION (AZOD814)
+Author : azod814
 License: MIT
 
 Educational & Ethical Use Only
