@@ -53,7 +53,7 @@ def banner():
             Panel.fit(
                 f"[bold {THEME_COLOR}]VEHICLE INFORMATION SYSTEM[/bold {THEME_COLOR}]\n"
                 f"[{THEME_COLOR}]Educational & Ethical Use Only[/]\n\n"
-                f"[bold {THEME_COLOR}]Author:[/] azod08   |   "
+                f"[bold {THEME_COLOR}]Author:[/] azod814   |   "
                 f"[bold {THEME_COLOR}]Version:[/] {VERSION}",
                 border_style=THEME_COLOR,
                 box=box.DOUBLE
