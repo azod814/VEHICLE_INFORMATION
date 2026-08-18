@@ -2157,44 +2157,152 @@ class VehicleInformationApp:
         return "N/A"
 
     def parse_date_value(self, value):
+        """
+        Parse the date formats commonly returned by vehicle APIs.
+
+        Important: this API returns dates such as:
+            23-Aug-2010
+            18-Aug-2011
+            22-Aug-2025
+
+        The previous parser did not include %d-%b-%Y, so those dates
+        were displayed correctly but could not be used for age/validity
+        calculations.
+        """
         text = stringify(value)
         if text == "N/A":
             return None
-        text = text.strip()
+
+        text = text.strip().replace(",", " ")
+        text = re.sub(r"\s+", " ", text)
+
+        # Most-specific formats first.
         formats = (
-            "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d",
-            "%d.%m.%Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S.%f"
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d",
+            "%d-%m-%Y",
+            "%d/%m/%Y",
+            "%Y/%m/%d",
+            "%d.%m.%Y",
+
+            # API format used by this vehicle service.
+            "%d-%b-%Y",
+            "%d-%B-%Y",
+            "%d/%b/%Y",
+            "%d/%B/%Y",
+            "%d %b %Y",
+            "%d %B %Y",
+
+            "%b-%d-%Y",
+            "%B-%d-%Y",
+            "%b %d %Y",
+            "%B %d %Y",
         )
+
         for fmt in formats:
             try:
                 return datetime.strptime(text[:26], fmt)
             except ValueError:
                 pass
-        match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+
+        # Numeric date fallback.
+        match = re.search(
+            r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})",
+            text
+        )
         if match:
             try:
-                return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+                return datetime(
+                    int(match.group(3)),
+                    int(match.group(2)),
+                    int(match.group(1))
+                )
             except ValueError:
                 pass
+
         return None
+
+    def vehicle_age_breakdown(self, registration_date):
+        """Return exact completed vehicle age as years, months and days."""
+        if not registration_date:
+            return None
+
+        today = datetime.now().date()
+        registered = registration_date.date()
+
+        if registered > today:
+            return None
+
+        years = today.year - registered.year
+        anniversary = registered.replace(year=registered.year + years)
+
+        if anniversary > today:
+            years -= 1
+            anniversary = registered.replace(year=registered.year + years)
+
+        months = 0
+        cursor = anniversary
+
+        while True:
+            next_month = cursor.month + 1
+            next_year = cursor.year
+            if next_month == 13:
+                next_month = 1
+                next_year += 1
+
+            # Safe end-of-month handling.
+            import calendar
+            next_day = min(
+                cursor.day,
+                calendar.monthrange(next_year, next_month)[1]
+            )
+            candidate = cursor.replace(
+                year=next_year,
+                month=next_month,
+                day=next_day
+            )
+
+            if candidate <= today:
+                cursor = candidate
+                months += 1
+            else:
+                break
+
+        days = (today - cursor).days
+        return years, months, days
 
     def vehicle_age_text(self, data):
         registration = self.find_value(data, "registration date", "reg date")
         dt = self.parse_date_value(registration)
-        if not dt:
+        breakdown = self.vehicle_age_breakdown(dt)
+
+        if not breakdown:
             return "N/A"
-        now = datetime.now()
-        months = (now.year - dt.year) * 12 + now.month - dt.month
-        if now.day < dt.day:
-            months -= 1
-        months = max(months, 0)
-        years, rem = divmod(months, 12)
-        if years and rem:
-            return f"{years} YEARS {rem} MONTHS"
+
+        years, months, days = breakdown
+        parts = []
+
         if years:
-            return f"{years} YEARS"
-        return f"{rem} MONTHS"
+            parts.append(f"{years} YEARS")
+        if months:
+            parts.append(f"{months} MONTHS")
+        if days or not parts:
+            parts.append(f"{days} DAYS")
+
+        return " ".join(parts)
+
+    def vehicle_age_short_text(self, data):
+        """Compact age for the main dashboard."""
+        registration = self.find_value(data, "registration date", "reg date")
+        dt = self.parse_date_value(registration)
+        breakdown = self.vehicle_age_breakdown(dt)
+
+        if not breakdown:
+            return "N/A"
+
+        years, months, days = breakdown
+        return f"{years}Y {months}M {days}D"
 
     def validity_state(self, data, *names):
         raw = self.find_value(data, *names)
@@ -2252,13 +2360,24 @@ class VehicleInformationApp:
             parts.append(f"Age: {age.title()}")
         self.smart_summary_text.config(text="\n".join(parts))
 
-        self.age_label.config(
-            text="REGISTERED SINCE  " + (
-                self.find_value(data, "registration date", "reg date")
-                if self.find_value(data, "registration date", "reg date") != "N/A"
-                else "N/A"
+        registration = self.find_value(data, "registration date", "reg date")
+        age_short = self.vehicle_age_short_text(data)
+
+        if registration != "N/A" and age_short != "N/A":
+            self.age_label.config(
+                text=f"REGISTERED SINCE  {registration}    |    VEHICLE AGE  {age_short}",
+                fg=CYAN
             )
-        )
+        elif registration != "N/A":
+            self.age_label.config(
+                text=f"REGISTERED SINCE  {registration}    |    VEHICLE AGE  CALCULATION UNAVAILABLE",
+                fg=YELLOW
+            )
+        else:
+            self.age_label.config(
+                text="REGISTERED SINCE  N/A    |    VEHICLE AGE  N/A",
+                fg=YELLOW
+            )
         rto_text = " / ".join(x for x in (rto, rto_name, rto_state, rto_region) if x != "N/A") or "N/A"
         self.rto_intel_label.config(text=f"RTO INTELLIGENCE  {rto_text}")
 
@@ -2283,22 +2402,24 @@ class VehicleInformationApp:
         registration_dt = self.parse_date_value(registration_raw)
         age = self.vehicle_age_text(data)
 
-        now = datetime.now()
         if registration_dt:
-            age_months = max(
-                0,
-                (now.year - registration_dt.year) * 12
-                + now.month - registration_dt.month
-                - (1 if now.day < registration_dt.day else 0)
-            )
-            age_years = age_months // 12
-            if age_years >= 15:
-                age_review = (
-                    "OVER 15 YEARS — AGE-BASED RENEWAL / FITNESS RULES "
-                    "SHOULD BE VERIFIED WITH THE RTO"
-                )
+            breakdown = self.vehicle_age_breakdown(registration_dt)
+
+            if breakdown:
+                age_years, age_months, age_days = breakdown
+
+                if age_years >= 15:
+                    age_review = (
+                        f"OVER 15 YEARS — {age_years} YEARS {age_months} MONTHS {age_days} DAYS OLD. "
+                        "CHECK APPLICABLE RENEWAL / FITNESS RULES."
+                    )
+                else:
+                    age_review = (
+                        f"VEHICLE AGE {age_years} YEARS {age_months} MONTHS {age_days} DAYS — "
+                        "NO 15-YEAR INFORMATIONAL FLAG"
+                    )
             else:
-                age_review = "CURRENT AGE — NO 15-YEAR INFORMATIONAL FLAG"
+                age_review = "AGE UNKNOWN — INVALID REGISTRATION DATE"
         else:
             age_review = "AGE UNKNOWN — REGISTRATION DATE NOT AVAILABLE"
 
