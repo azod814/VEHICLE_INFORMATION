@@ -29,6 +29,12 @@ from urllib.parse import urlencode
 from tkinter import filedialog
 
 try:
+    import qrcode
+    QRCODE_AVAILABLE = True
+except ImportError:
+    QRCODE_AVAILABLE = False
+
+try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
@@ -43,7 +49,7 @@ except ImportError:
 
 API_BASE = "https://vehicleinfobyterabaap.vercel.app/lookup"
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
-VERSION = "4.0"
+VERSION = "5.0"
 AUTHOR = "azod814"
 
 BG = "#020504"
@@ -322,6 +328,8 @@ class VehicleInformationApp:
         self.current_raw_data = {}
         self.search_history = []
         self.scanning = False
+        self.stop_event = threading.Event()
+        self.lookup_generation = 0
 
         self.vehicle_image = None
         self.vehicle_image_path = None
@@ -426,6 +434,14 @@ class VehicleInformationApp:
             padx=22, pady=8, cursor="hand2"
         )
         self.scan_btn.pack(side="right")
+
+        self.stop_btn = tk.Button(
+            search_row, text="■  STOP", command=self.stop_lookup,
+            bg="#16070b", fg=RED, activebackground=RED, activeforeground=BLACK,
+            font=(MONO, 9, "bold"), relief="flat", bd=1,
+            highlightbackground=RED, padx=12, pady=8, cursor="hand2", state="disabled"
+        )
+        self.stop_btn.pack(side="right", padx=(0, 8))
 
         status = tk.Frame(top, bg=BG2, width=255)
         status.grid(row=0, column=2, sticky="nse", padx=18)
@@ -619,6 +635,7 @@ class VehicleInformationApp:
         self.dashboard_canvas.bind("<Button-4>", lambda e: self.dashboard_canvas.yview_scroll(-3, "units"))
         self.dashboard_canvas.bind("<Button-5>", lambda e: self.dashboard_canvas.yview_scroll(3, "units"))
 
+        self.build_intelligence_section()
         self.build_vehicle_details()
         self.build_additional_information()
         self.build_all_data_section()
@@ -643,6 +660,47 @@ class VehicleInformationApp:
         ).pack(anchor="w", padx=14, pady=10)
 
         return frame
+
+    def build_intelligence_section(self):
+        frame = self.section(self.dashboard_frame, "◆  VEHICLE INTELLIGENCE")
+        frame.pack(fill="x", padx=10, pady=(10, 7))
+
+        top = tk.Frame(frame, bg=PANEL)
+        top.pack(fill="x", padx=10, pady=(0, 8))
+
+        # Smart summary
+        summary = tk.Frame(top, bg=CARD, highlightbackground=BORDER2, highlightthickness=1)
+        summary.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        tk.Label(summary, text="SMART VEHICLE SUMMARY", fg=NEON, bg=CARD, font=(MONO, 8, "bold")).pack(anchor="w", padx=12, pady=(10, 5))
+        self.smart_summary_text = tk.Label(
+            summary, text="Perform a vehicle lookup to generate an intelligent summary.",
+            fg=WHITE, bg=CARD, font=(MONO, 8), justify="left", anchor="nw",
+            wraplength=520
+        )
+        self.smart_summary_text.pack(fill="x", padx=12, pady=(0, 10))
+
+        # Health score
+        health = tk.Frame(top, bg=CARD, highlightbackground=BORDER2, highlightthickness=1, width=230)
+        health.pack(side="left", fill="y", padx=(4, 0))
+        health.pack_propagate(False)
+        tk.Label(health, text="VEHICLE HEALTH SCORE", fg=NEON, bg=CARD, font=(MONO, 8, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        self.health_score_label = tk.Label(health, text="-- / 100", fg=YELLOW, bg=CARD, font=(MONO, 20, "bold"))
+        self.health_score_label.pack(anchor="w", padx=12)
+        self.health_status_label = tk.Label(health, text="WAITING FOR DATA", fg=MUTED, bg=CARD, font=(MONO, 7, "bold"))
+        self.health_status_label.pack(anchor="w", padx=12, pady=(0, 8))
+
+        bottom = tk.Frame(frame, bg=PANEL)
+        bottom.pack(fill="x", padx=10, pady=(0, 10))
+        self.age_label = tk.Label(bottom, text="VEHICLE AGE  --", fg=CYAN, bg=CARD, font=(MONO, 8, "bold"), anchor="w", padx=12, pady=9, highlightbackground=BORDER2, highlightthickness=1)
+        self.age_label.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.rto_intel_label = tk.Label(bottom, text="RTO INTELLIGENCE  --", fg=WHITE, bg=CARD, font=(MONO, 8, "bold"), anchor="w", padx=12, pady=9, highlightbackground=BORDER2, highlightthickness=1)
+        self.rto_intel_label.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        self.health_details_label = tk.Label(
+            frame, text="Insurance: --   |   PUC: --   |   Fitness: --   |   Tax: --",
+            fg=MUTED, bg=PANEL, font=(MONO, 7), anchor="w"
+        )
+        self.health_details_label.pack(fill="x", padx=12, pady=(0, 9))
 
     def build_vehicle_details(self):
         frame = self.section(
@@ -856,7 +914,7 @@ class VehicleInformationApp:
             for key, value in data.items():
                 self.all_data_text.insert(
                     "end",
-                    f"{key.upper():34} : {stringify(value)}\n"
+                    f"{key.upper():34} : {self.mask_sensitive_value(key, value)}\n"
                 )
 
         self.all_data_text.configure(state="disabled")
@@ -1443,6 +1501,9 @@ class VehicleInformationApp:
         self.action_button(
             frame, "☆  ADD TO FAVORITES", self.favorite
         )
+        self.action_button(
+            frame, "▣  QR CODE REPORT", self.generate_qr_report
+        )
 
     def action_button(self, parent, text, command):
         tk.Button(
@@ -1514,6 +1575,9 @@ class VehicleInformationApp:
             return
 
         self.scanning = True
+        self.stop_event.clear()
+        self.lookup_generation += 1
+        generation = self.lookup_generation
 
         self.vehicle_image = None
         self.vehicle_image_path = None
@@ -1532,6 +1596,7 @@ class VehicleInformationApp:
             state="disabled",
             bg="#073b20"
         )
+        self.stop_btn.config(state="normal")
 
         self.status_label.config(
             text="● SCANNING",
@@ -1556,16 +1621,20 @@ class VehicleInformationApp:
 
         threading.Thread(
             target=self.lookup_worker,
-            args=(rc,),
+            args=(rc, generation),
             daemon=True
         ).start()
 
-    def lookup_worker(self, rc):
+    def lookup_worker(self, rc, generation):
         start = time.time()
         cache_hit = False
         raw = None
 
         try:
+            if self.stop_event.is_set() or generation != self.lookup_generation:
+                self.root.after(0, self.lookup_stopped)
+                return
+
             path = cache_file(rc)
 
             # CACHE-FIRST: show old result instantly if available,
@@ -1576,6 +1645,10 @@ class VehicleInformationApp:
                         cached_raw = json.load(file)
 
                     cache_hit = True
+
+                    if self.stop_event.is_set() or generation != self.lookup_generation:
+                        self.root.after(0, self.lookup_stopped)
+                        return
 
                     try:
                         cached_normalized = normalize_api_response(cached_raw)
@@ -1602,6 +1675,10 @@ class VehicleInformationApp:
                 )
             )
 
+            if self.stop_event.is_set() or generation != self.lookup_generation:
+                self.root.after(0, self.lookup_stopped)
+                return
+
             url = API_BASE + "?" + urlencode({"rc": rc})
 
             response = requests.get(
@@ -1609,17 +1686,20 @@ class VehicleInformationApp:
                 timeout=(4, 12),
                 headers={
                     "User-Agent":
-                        "VehicleInformationAZOD814/4.0"
+                        "VehicleInformationAZOD814/5.0"
                 }
             )
 
             response.raise_for_status()
+            if self.stop_event.is_set() or generation != self.lookup_generation:
+                self.root.after(0, self.lookup_stopped)
+                return
             raw = response.json()
 
             try:
                 with open(path, "w", encoding="utf-8") as file:
                     json.dump(
-                        raw,
+                        self.sanitize_data_for_storage(raw),
                         file,
                         indent=2,
                         ensure_ascii=False
@@ -1647,6 +1727,9 @@ class VehicleInformationApp:
             )
 
         except requests.exceptions.Timeout as error:
+            if self.stop_event.is_set() or generation != self.lookup_generation:
+                self.root.after(0, self.lookup_stopped)
+                return
             log(f"API timeout for {rc}: {error}")
 
             # If cached result was already shown, keep it and simply
@@ -1669,6 +1752,9 @@ class VehicleInformationApp:
                 )
 
         except requests.exceptions.RequestException as error:
+            if self.stop_event.is_set() or generation != self.lookup_generation:
+                self.root.after(0, self.lookup_stopped)
+                return
             log(f"API request error for {rc}: {error}")
 
             if cache_hit:
@@ -1689,6 +1775,9 @@ class VehicleInformationApp:
                 )
 
         except ValueError as error:
+            if self.stop_event.is_set() or generation != self.lookup_generation:
+                self.root.after(0, self.lookup_stopped)
+                return
             log(f"API JSON error for {rc}: {error}")
 
             if cache_hit:
@@ -1708,6 +1797,9 @@ class VehicleInformationApp:
                 )
 
         except Exception as error:
+            if self.stop_event.is_set() or generation != self.lookup_generation:
+                self.root.after(0, self.lookup_stopped)
+                return
             log(f"Unexpected lookup error for {rc}: {error}")
 
             if cache_hit:
@@ -1751,6 +1843,7 @@ class VehicleInformationApp:
 
     def live_refresh_notice(self, title, message):
         self.scanning = False
+        self.stop_btn.config(state="disabled")
         self.scan_btn.config(
             text="⌕  SEARCH",
             state="normal",
@@ -1781,7 +1874,12 @@ class VehicleInformationApp:
         cached,
         response_time
     ):
+        if self.stop_event.is_set():
+            self.lookup_stopped()
+            return
+
         self.scanning = False
+        self.stop_btn.config(state="disabled")
 
         self.scan_btn.config(
             text="⌕  SEARCH",
@@ -1947,9 +2045,149 @@ class VehicleInformationApp:
 
         return "N/A"
 
+    def parse_date_value(self, value):
+        text = stringify(value)
+        if text == "N/A":
+            return None
+        text = text.strip()
+        formats = (
+            "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d",
+            "%d.%m.%Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )
+        for fmt in formats:
+            try:
+                return datetime.strptime(text[:26], fmt)
+            except ValueError:
+                pass
+        match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+        if match:
+            try:
+                return datetime(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+            except ValueError:
+                pass
+        return None
+
+    def vehicle_age_text(self, data):
+        registration = self.find_value(data, "registration date", "reg date")
+        dt = self.parse_date_value(registration)
+        if not dt:
+            return "N/A"
+        now = datetime.now()
+        months = (now.year - dt.year) * 12 + now.month - dt.month
+        if now.day < dt.day:
+            months -= 1
+        months = max(months, 0)
+        years, rem = divmod(months, 12)
+        if years and rem:
+            return f"{years} YEARS {rem} MONTHS"
+        if years:
+            return f"{years} YEARS"
+        return f"{rem} MONTHS"
+
+    def validity_state(self, data, *names):
+        raw = self.find_value(data, *names)
+        if raw == "N/A":
+            return "UNKNOWN"
+        dt = self.parse_date_value(raw)
+        if dt:
+            return "ACTIVE" if dt.date() >= datetime.now().date() else "EXPIRED"
+        text = raw.upper()
+        if any(word in text for word in ("EXPIRED", "INVALID", "NO", "INACTIVE")):
+            return "EXPIRED"
+        if any(word in text for word in ("VALID", "ACTIVE", "YES")):
+            return "ACTIVE"
+        return "UNKNOWN"
+
+    def calculate_health_score(self, data):
+        checks = [
+            self.validity_state(data, "insurance upto", "insurance expiry"),
+            self.validity_state(data, "puc upto", "puc expiry"),
+            self.validity_state(data, "fitness upto", "fitness expiry"),
+            self.validity_state(data, "tax upto", "tax expiry"),
+        ]
+        known = [x for x in checks if x != "UNKNOWN"]
+        if not known:
+            return None, checks
+        score = 100
+        for state in checks:
+            if state == "EXPIRED":
+                score -= 25
+            elif state == "UNKNOWN":
+                score -= 5
+        return max(0, min(100, score)), checks
+
+    def update_intelligence(self, data):
+        if not data:
+            return
+        maker = self.find_value(data, "manufacturer", "maker", "make", "model name")
+        model = self.find_value(data, "maker model", "model", "vehicle model")
+        fuel = self.find_value(data, "fuel type")
+        city = self.find_value(data, "city name", "city")
+        rto = self.find_value(data, "rto code")
+        rto_name = self.find_value(data, "rto name", "registered rto")
+        rto_state = self.find_value(data, "state")
+        rto_region = self.find_value(data, "region", "city")
+        age = self.vehicle_age_text(data)
+        score, checks = self.calculate_health_score(data)
+
+        vehicle_name = " ".join(x for x in (maker, model) if x != "N/A").strip() or "Vehicle"
+        parts = [vehicle_name]
+        if fuel != "N/A":
+            parts.append(f"Fuel: {fuel}")
+        if city != "N/A":
+            parts.append(f"Registered: {city}")
+        if age != "N/A":
+            parts.append(f"Age: {age.title()}")
+        self.smart_summary_text.config(text="\n".join(parts))
+
+        self.age_label.config(text=f"VEHICLE AGE  {age if age != 'N/A' else '--'}")
+        rto_text = " / ".join(x for x in (rto, rto_name, rto_state, rto_region) if x != "N/A") or "N/A"
+        self.rto_intel_label.config(text=f"RTO INTELLIGENCE  {rto_text}")
+
+        if score is None:
+            self.health_score_label.config(text="-- / 100", fg=YELLOW)
+            self.health_status_label.config(text="INSUFFICIENT VALIDITY DATA", fg=MUTED)
+        else:
+            color = NEON if score >= 80 else (YELLOW if score >= 50 else RED)
+            status = "HEALTHY" if score >= 80 else ("REVIEW REQUIRED" if score >= 50 else "ATTENTION REQUIRED")
+            self.health_score_label.config(text=f"{score} / 100", fg=color)
+            self.health_status_label.config(text=status, fg=color)
+
+        labels = ("Insurance", "PUC", "Fitness", "Tax")
+        self.health_details_label.config(
+            text="   |   ".join(f"{name}: {state}" for name, state in zip(labels, checks)),
+            fg=WHITE
+        )
+
+    def plate_intelligence(self, rc):
+        rc = re.sub(r"[\s-]+", "", rc.upper())
+        pattern = r"^([A-Z]{2})(\d{1,2})([A-Z]{0,3})(\d{1,4})$"
+        match = re.match(pattern, rc)
+        if not match:
+            return None
+        state, rto, series, number = match.groups()
+        return {"state": state, "rto": rto, "series": series or "--", "number": number, "normalized": rc}
+
+    def mask_sensitive_value(self, key, value):
+        key = normalize_key(key)
+        value = stringify(value)
+        sensitive = ("owner name", "phone", "mobile", "address", "owner serial")
+        if any(token in key for token in sensitive) and value != "N/A":
+            if "phone" in key or "mobile" in key:
+                digits = re.sub(r"\D", "", value)
+                return ("*" * max(0, len(digits) - 4)) + digits[-4:] if digits else "[PROTECTED]"
+            if "address" in key:
+                return "[PROTECTED PERSONAL ADDRESS]"
+            if "owner serial" in key:
+                return "[PROTECTED]"
+            parts = value.split()
+            return (parts[0][0] + "***") if parts else "[PROTECTED]"
+        return value
+
     def populate_vehicle_data(self, data):
         items = [
-            ("▧", "ADDRESS", self.find_value(data, "address")),
+            ("▧", "ADDRESS", self.mask_sensitive_value("address", self.find_value(data, "address"))),
             ("▥", "CITY", self.find_value(data, "city name", "city")),
             ("▦", "FITNESS UPTO", self.find_value(data, "fitness upto")),
             ("◉", "FUEL TYPE", self.find_value(data, "fuel type")),
@@ -1958,13 +2196,13 @@ class VehicleInformationApp:
             ("▦", "INSURANCE UPTO", self.find_value(data, "insurance upto")),
             ("▱", "MAKER MODEL", self.find_value(data, "maker model")),
             ("◇", "MODEL NAME", self.find_value(data, "model name")),
-            ("♙", "OWNER NAME", self.find_value(data, "owner name")),
-            ("▣", "OWNER SERIAL NO", self.find_value(data, "owner serial no", "owner serial number")),
+            ("♙", "OWNER NAME", self.mask_sensitive_value("owner name", self.find_value(data, "owner name"))),
+            ("▣", "OWNER SERIAL NO", self.mask_sensitive_value("owner serial no", self.find_value(data, "owner serial no", "owner serial number"))),
             ("❧", "FUEL NORMS", self.find_value(data, "fuel norms")),
             ("▦", "INSURANCE EXPIRY", self.find_value(data, "insurance expiry")),
             ("⚙", "PUC NO", self.find_value(data, "puc no", "puc number")),
             ("▦", "PUC UPTO", self.find_value(data, "puc upto")),
-            ("⌕", "PHONE", self.find_value(data, "phone", "mobile")),
+            ("⌕", "PHONE", self.mask_sensitive_value("phone", self.find_value(data, "phone", "mobile"))),
             ("▥", "REGISTERED RTO", self.find_value(data, "registered rto", "rto name")),
             ("▦", "REGISTRATION DATE", self.find_value(data, "registration date")),
             ("₹", "TAX UPTO", self.find_value(data, "tax upto")),
@@ -1975,7 +2213,7 @@ class VehicleInformationApp:
 
         for key, value in data.items():
             if normalize_key(key) not in known:
-                items.append(("◇", key.upper(), value))
+                items.append(("◇", key.upper(), self.mask_sensitive_value(key, value)))
 
         self.render_details(items)
 
@@ -2009,6 +2247,7 @@ class VehicleInformationApp:
             ],
         )
 
+        self.update_intelligence(data)
         self.root.after_idle(self.reflow_detail_rows)
 
     # ---------------------------- responsive ----------------------------
@@ -2680,13 +2919,16 @@ class VehicleInformationApp:
 
     def validate_plate(self):
         rc = self.rc_entry.get().strip().upper()
+        info = self.plate_intelligence(rc)
 
-        pattern = r"^[A-Z]{2}[0-9]{1,2}[A-Z]{0,3}[0-9]{1,4}$"
-
-        if re.match(pattern, rc):
+        if info:
             self.show_dialog(
                 "NUMBER PLATE CHECK",
-                f"TARGET\n{rc}\n\n"
+                f"TARGET\n{info['normalized']}\n\n"
+                f"STATE / REGION\n{info['state']}\n\n"
+                f"RTO CODE\n{info['rto']}\n\n"
+                f"SERIES\n{info['series']}\n\n"
+                f"REGISTRATION NUMBER\n{info['number']}\n\n"
                 "FORMAT\nVALID / RECOGNIZED",
                 accent=NEON
             )
@@ -2694,11 +2936,86 @@ class VehicleInformationApp:
             self.show_dialog(
                 "NUMBER PLATE CHECK",
                 f"TARGET\n{rc or 'EMPTY'}\n\n"
-                "FORMAT\nINVALID / UNRECOGNIZED",
+                "FORMAT\nINVALID / UNRECOGNIZED\n\n"
+                "EXPECTED EXAMPLE\nUP14AB1234",
                 accent=YELLOW
             )
 
+    def generate_qr_report(self):
+        if not self.current_data:
+            self.show_dialog("NO DATA", "Perform a vehicle lookup first.", accent=YELLOW)
+            return
+        if not QRCODE_AVAILABLE or not PIL_AVAILABLE:
+            self.show_dialog(
+                "QR MODULE NOT INSTALLED",
+                "Install the free qrcode package with:\n\npip install qrcode[pil]",
+                accent=YELLOW
+            )
+            return
+
+        summary = [
+            "VEHICLE INFORMATION REPORT",
+            f"VEHICLE: {self.current_rc}",
+            f"MAKER/MODEL: {self.find_value(self.current_data, 'maker model', 'model', 'vehicle model')}",
+            f"FUEL: {self.find_value(self.current_data, 'fuel type')}",
+            f"RTO: {self.find_value(self.current_data, 'rto code')} / {self.find_value(self.current_data, 'rto name', 'registered rto')}",
+            f"REGISTRATION DATE: {self.find_value(self.current_data, 'registration date')}",
+            f"VEHICLE AGE: {self.vehicle_age_text(self.current_data)}",
+        ]
+        score, checks = self.calculate_health_score(self.current_data)
+        summary.append(f"HEALTH SCORE: {score if score is not None else 'N/A'} / 100")
+        summary.append("VALIDITY: " + ", ".join(checks))
+        summary.append("\nEducational & Ethical Use Only.")
+        payload = "\n".join(summary)
+
+        try:
+            ensure_dirs()
+            qr_path = f"results/{self.current_rc}_qr.png"
+            img = qrcode.make(payload)
+            img.save(qr_path)
+
+            dialog = tk.Toplevel(self.root)
+            dialog.title("QR CODE REPORT")
+            dialog.configure(bg=BG)
+            dialog.geometry("520x650")
+            dialog.minsize(420, 560)
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+            header = tk.Frame(dialog, bg=BG2, height=60, highlightbackground=BORDER, highlightthickness=1)
+            header.pack(fill="x", padx=10, pady=(10, 6))
+            header.pack_propagate(False)
+            tk.Label(header, text="▣  QR CODE REPORT", fg=NEON, bg=BG2, font=(MONO, 12, "bold")).pack(side="left", padx=14)
+
+            body = tk.Frame(dialog, bg=PANEL, highlightbackground=BORDER2, highlightthickness=1)
+            body.pack(fill="both", expand=True, padx=10, pady=6)
+            with Image.open(qr_path) as qr_img:
+                qr_img = qr_img.convert("RGB")
+                qr_img.thumbnail((400, 400), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(qr_img)
+            label = tk.Label(body, image=photo, bg="white")
+            label.image = photo
+            label.pack(pady=18)
+            tk.Label(body, text=f"SCAN FOR {self.current_rc} REPORT DATA", fg=NEON, bg=PANEL, font=(MONO, 8, "bold")).pack()
+            tk.Label(body, text="Sensitive personal fields are intentionally protected.", fg=MUTED, bg=PANEL, font=(MONO, 7)).pack(pady=(4, 10))
+
+            footer = tk.Frame(dialog, bg=BG)
+            footer.pack(fill="x", padx=10, pady=(6, 10))
+            tk.Button(footer, text="CLOSE", command=dialog.destroy, bg="#071a0d", fg=NEON, activebackground=NEON, activeforeground=BLACK, font=(MONO, 8, "bold"), relief="flat", bd=1, padx=18, pady=7).pack(side="right")
+            self.center_toplevel(dialog)
+            self.telemetry_log(f"[QR] Report generated: {qr_path}\n")
+        except Exception as error:
+            log(f"QR generation error: {error}")
+            self.show_dialog("QR ERROR", str(error), accent=RED)
+
     # ---------------------------- export ----------------------------
+
+    def sanitize_data_for_storage(self, value, key=""):
+        if isinstance(value, dict):
+            return {k: self.sanitize_data_for_storage(v, str(k)) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self.sanitize_data_for_storage(v, key) for v in value]
+        return self.mask_sensitive_value(key, value)
 
     def save_result(self):
         if not self.current_rc:
@@ -2783,7 +3100,7 @@ class VehicleInformationApp:
 
             for key, value in self.current_data.items():
                 lines.append(
-                    f"{key.upper()}: {stringify(value)}"
+                    f"{key.upper()}: {self.mask_sensitive_value(key, value)}"
                 )
 
             text = "\n".join(lines)
@@ -2842,7 +3159,7 @@ class VehicleInformationApp:
                 for key, value in self.current_data.items():
                     file.write(
                         f"{key.upper():35} "
-                        f"{stringify(value)}\n"
+                        f"{self.mask_sensitive_value(key, value)}\n"
                     )
 
             self.show_dialog(
@@ -2879,8 +3196,32 @@ class VehicleInformationApp:
             text_mode=False
         )
 
+    def stop_lookup(self):
+        if not self.scanning:
+            return
+
+        self.stop_event.set()
+        self.lookup_generation += 1
+        self.scanning = False
+        self.stop_btn.config(state="disabled")
+        self.scan_btn.config(text="⌕  SEARCH", state="normal", bg="#041c0e")
+        self.status_label.config(text="● STOPPED", fg=RED)
+        self.cache_label.config(text="CACHE   READY", fg=MUTED)
+        self.summary_status.config(text="STOPPED", fg=RED)
+        self.telemetry_log("[SCAN] Lookup stopped by user.\n")
+
+    def lookup_stopped(self):
+        self.scanning = False
+        self.stop_btn.config(state="disabled")
+        self.scan_btn.config(text="⌕  SEARCH", state="normal", bg="#041c0e")
+        self.status_label.config(text="● STOPPED", fg=RED)
+        self.cache_label.config(text="CACHE   READY", fg=MUTED)
+        self.summary_status.config(text="STOPPED", fg=RED)
+        self.telemetry_log("[SCAN] Lookup cancelled.\n")
+
     def lookup_error(self, error):
         self.scanning = False
+        self.stop_btn.config(state="disabled")
 
         self.scan_btn.config(
             text="⌕  SEARCH",
