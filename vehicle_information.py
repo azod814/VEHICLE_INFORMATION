@@ -1,5 +1,5 @@
 """
-VEHICLE_INFORMATION (AZOD814) - v4.0
+VEHICLE_INFORMATION (AZOD814) - v5.2
 Cyberpunk Vehicle Intelligence Dashboard
 
 Educational & Ethical Use Only.
@@ -20,12 +20,15 @@ import json
 import time
 import hashlib
 import threading
+import socket
+import mimetypes
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import tkinter as tk
 import re
 import html
 import requests
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from tkinter import filedialog
 
 try:
@@ -46,10 +49,22 @@ try:
 except ImportError:
     DDGS_AVAILABLE = False
 
+try:
+    from reportlab.lib import colors as pdf_colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    )
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 
 API_BASE = "https://vehicleinfobyterabaap.vercel.app/lookup"
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
-VERSION = "5.0"
+VERSION = "5.2"
 AUTHOR = "azod814"
 
 BG = "#020504"
@@ -68,6 +83,33 @@ RED = "#ff3158"
 BLACK = "#010302"
 FONT = "DejaVu Sans"
 MONO = "DejaVu Sans Mono"
+
+
+def get_local_ip():
+    """Best-effort LAN address used by QR report links."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+class ReportHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class ReportRequestHandler(SimpleHTTPRequestHandler):
+    """Serve generated HTML/PDF reports from the local results directory."""
+    def __init__(self, *args, directory=None, **kwargs):
+        super().__init__(*args, directory=directory, **kwargs)
+
+    def log_message(self, format, *args):
+        # Keep HTTP request noise out of the terminal.
+        log("[REPORT SERVER] " + (format % args))
 
 
 def ensure_dirs():
@@ -342,6 +384,9 @@ class VehicleInformationApp:
         self._last_window_size = (0, 0)
 
         self._theme_dialog = None
+        self.report_server = None
+        self.report_server_thread = None
+        self.report_server_port = None
 
         ensure_dirs()
         self.build_ui()
@@ -349,6 +394,7 @@ class VehicleInformationApp:
 
         self.root.after(250, self.on_window_resize)
         self.root.after(400, self.draw_vehicle_hud)
+        self.root.protocol("WM_DELETE_WINDOW", self.close_application)
 
     # ---------------------------- UI ----------------------------
 
@@ -635,6 +681,14 @@ class VehicleInformationApp:
         self.dashboard_canvas.bind("<Button-4>", lambda e: self.dashboard_canvas.yview_scroll(-3, "units"))
         self.dashboard_canvas.bind("<Button-5>", lambda e: self.dashboard_canvas.yview_scroll(3, "units"))
 
+        # Normal mouse-wheel scrolling anywhere inside the dashboard.
+        # Child labels/frames do not automatically pass wheel events to the
+        # canvas, so use a global handler that only reacts while the pointer
+        # is physically over this dashboard canvas.
+        self.root.bind_all("<MouseWheel>", self.mouse_scroll_anywhere, add="+")
+        self.root.bind_all("<Button-4>", self.mouse_scroll_anywhere, add="+")
+        self.root.bind_all("<Button-5>", self.mouse_scroll_anywhere, add="+")
+
         self.build_intelligence_section()
         self.build_vehicle_details()
         self.build_additional_information()
@@ -642,11 +696,36 @@ class VehicleInformationApp:
 
     def mouse_scroll(self, event):
         try:
-            delta = -3 if event.delta < 0 else 3
+            if hasattr(event, "delta"):
+                delta = -3 if event.delta < 0 else 3
+            else:
+                delta = -3 if getattr(event, "num", 5) == 4 else 3
             self.dashboard_canvas.yview_scroll(delta, "units")
         except Exception:
             pass
         return "break"
+
+    def mouse_scroll_anywhere(self, event):
+        """Scroll the main dashboard when the pointer is over any child widget."""
+        try:
+            canvas = self.dashboard_canvas
+            x0 = canvas.winfo_rootx()
+            y0 = canvas.winfo_rooty()
+            x1 = x0 + canvas.winfo_width()
+            y1 = y0 + canvas.winfo_height()
+            px = self.root.winfo_pointerx()
+            py = self.root.winfo_pointery()
+
+            if x0 <= px <= x1 and y0 <= py <= y1:
+                if hasattr(event, "delta"):
+                    delta = -3 if event.delta < 0 else 3
+                else:
+                    delta = -3 if getattr(event, "num", 5) == 4 else 3
+                canvas.yview_scroll(delta, "units")
+                return "break"
+        except Exception:
+            pass
+        return None
 
     def section(self, parent, title):
         frame = tk.Frame(
@@ -690,11 +769,43 @@ class VehicleInformationApp:
         self.health_status_label.pack(anchor="w", padx=12, pady=(0, 8))
 
         bottom = tk.Frame(frame, bg=PANEL)
-        bottom.pack(fill="x", padx=10, pady=(0, 10))
-        self.age_label = tk.Label(bottom, text="VEHICLE AGE  --", fg=CYAN, bg=CARD, font=(MONO, 8, "bold"), anchor="w", padx=12, pady=9, highlightbackground=BORDER2, highlightthickness=1)
-        self.age_label.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.rto_intel_label = tk.Label(bottom, text="RTO INTELLIGENCE  --", fg=WHITE, bg=CARD, font=(MONO, 8, "bold"), anchor="w", padx=12, pady=9, highlightbackground=BORDER2, highlightthickness=1)
+        bottom.pack(fill="x", padx=10, pady=(0, 6))
+
+        # Dedicated, highly visible age/validity control.
+        self.age_check_btn = tk.Button(
+            bottom,
+            text="⌛  CHECK VEHICLE AGE + VALIDITY",
+            command=self.show_age_validity_report,
+            bg="#041c0e",
+            fg=CYAN,
+            activebackground=CYAN,
+            activeforeground=BLACK,
+            font=(MONO, 8, "bold"),
+            relief="flat",
+            bd=1,
+            highlightbackground=BORDER2,
+            padx=12,
+            pady=8,
+            cursor="hand2"
+        )
+        self.age_check_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        self.rto_intel_label = tk.Label(
+            bottom,
+            text="RTO INTELLIGENCE  --",
+            fg=WHITE, bg=CARD, font=(MONO, 8, "bold"),
+            anchor="w", padx=12, pady=9,
+            highlightbackground=BORDER2, highlightthickness=1
+        )
         self.rto_intel_label.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        self.age_label = tk.Label(
+            frame,
+            text="AGE CHECK: PRESS BUTTON ABOVE",
+            fg=CYAN, bg=PANEL, font=(MONO, 7, "bold"),
+            anchor="w"
+        )
+        self.age_label.pack(fill="x", padx=12, pady=(0, 3))
 
         self.health_details_label = tk.Label(
             frame, text="Insurance: --   |   PUC: --   |   Fitness: --   |   Tax: --",
@@ -1746,8 +1857,8 @@ class VehicleInformationApp:
             else:
                 self.root.after(
                     0,
-                    lambda: self.lookup_error(
-                        f"API request timed out.\n\n{error}"
+                    lambda error_text=str(error): self.lookup_error(
+                        f"API request timed out.\n\n{error_text}"
                     )
                 )
 
@@ -1760,17 +1871,17 @@ class VehicleInformationApp:
             if cache_hit:
                 self.root.after(
                     0,
-                    lambda: self.live_refresh_notice(
+                    lambda error_text=str(error): self.live_refresh_notice(
                         "LIVE API REFRESH FAILED",
                         "Cached data remains visible. "
-                        f"\n\n{error}"
+                        f"\n\n{error_text}"
                     )
                 )
             else:
                 self.root.after(
                     0,
-                    lambda: self.lookup_error(
-                        f"Network/API error.\n\n{error}"
+                    lambda error_text=str(error): self.lookup_error(
+                        f"Network/API error.\n\n{error_text}"
                     )
                 )
 
@@ -1791,8 +1902,8 @@ class VehicleInformationApp:
             else:
                 self.root.after(
                     0,
-                    lambda: self.lookup_error(
-                        f"API returned invalid JSON.\n\n{error}"
+                    lambda error_text=str(error): self.lookup_error(
+                        f"API returned invalid JSON.\n\n{error_text}"
                     )
                 )
 
@@ -1805,17 +1916,17 @@ class VehicleInformationApp:
             if cache_hit:
                 self.root.after(
                     0,
-                    lambda: self.live_refresh_notice(
+                    lambda error_text=str(error): self.live_refresh_notice(
                         "LIVE REFRESH ERROR",
-                        str(error)
+                        error_text
                     )
                 )
             else:
                 self.root.after(
                     0,
-                    lambda: self.lookup_error(
+                    lambda error_type=type(error).__name__, error_text=str(error): self.lookup_error(
                         f"Unexpected lookup error.\n\n"
-                        f"{type(error).__name__}: {error}"
+                        f"{error_type}: {error_text}"
                     )
                 )
 
@@ -2141,7 +2252,13 @@ class VehicleInformationApp:
             parts.append(f"Age: {age.title()}")
         self.smart_summary_text.config(text="\n".join(parts))
 
-        self.age_label.config(text=f"VEHICLE AGE  {age if age != 'N/A' else '--'}")
+        self.age_label.config(
+            text="REGISTERED SINCE  " + (
+                self.find_value(data, "registration date", "reg date")
+                if self.find_value(data, "registration date", "reg date") != "N/A"
+                else "N/A"
+            )
+        )
         rto_text = " / ".join(x for x in (rto, rto_name, rto_state, rto_region) if x != "N/A") or "N/A"
         self.rto_intel_label.config(text=f"RTO INTELLIGENCE  {rto_text}")
 
@@ -2159,6 +2276,205 @@ class VehicleInformationApp:
             text="   |   ".join(f"{name}: {state}" for name, state in zip(labels, checks)),
             fg=WHITE
         )
+
+    def age_validity_details(self, data):
+        """Build the one-click age/validity report from the current API data."""
+        registration_raw = self.find_value(data, "registration date", "reg date")
+        registration_dt = self.parse_date_value(registration_raw)
+        age = self.vehicle_age_text(data)
+
+        now = datetime.now()
+        if registration_dt:
+            age_months = max(
+                0,
+                (now.year - registration_dt.year) * 12
+                + now.month - registration_dt.month
+                - (1 if now.day < registration_dt.day else 0)
+            )
+            age_years = age_months // 12
+            if age_years >= 15:
+                age_review = (
+                    "OVER 15 YEARS — AGE-BASED RENEWAL / FITNESS RULES "
+                    "SHOULD BE VERIFIED WITH THE RTO"
+                )
+            else:
+                age_review = "CURRENT AGE — NO 15-YEAR INFORMATIONAL FLAG"
+        else:
+            age_review = "AGE UNKNOWN — REGISTRATION DATE NOT AVAILABLE"
+
+        fields = [
+            ("INSURANCE", self.validity_state(data, "insurance upto", "insurance expiry")),
+            ("PUC", self.validity_state(data, "puc upto", "puc expiry")),
+            ("FITNESS", self.validity_state(data, "fitness upto", "fitness expiry")),
+            ("TAX", self.validity_state(data, "tax upto", "tax expiry")),
+        ]
+
+        score, checks = self.calculate_health_score(data)
+        expired = [name for (name, state) in fields if state == "EXPIRED"]
+        unknown = [name for (name, state) in fields if state == "UNKNOWN"]
+
+        if expired:
+            overall = "NOT CURRENTLY VALID — " + ", ".join(expired) + " EXPIRED"
+            overall_color = RED
+        elif unknown:
+            overall = "PARTIAL CHECK — SOME VALIDITY DATA UNAVAILABLE"
+            overall_color = YELLOW
+        else:
+            overall = "CURRENTLY VALID — ALL CHECKED VALIDITY DATES ACTIVE"
+            overall_color = NEON
+
+        return {
+            "registration": registration_raw,
+            "purchase": self.find_value(
+                data,
+                "purchase date",
+                "date of purchase",
+                "purchase",
+                "delivery date",
+                "delivery"
+            ),
+            "age": age,
+            "age_review": age_review,
+            "fields": fields,
+            "score": score,
+            "checks": checks,
+            "overall": overall,
+            "overall_color": overall_color,
+        }
+
+    def show_age_validity_report(self):
+        if not self.current_data:
+            self.show_dialog(
+                "NO VEHICLE DATA",
+                "Perform a vehicle lookup first.",
+                accent=YELLOW
+            )
+            return
+
+        report = self.age_validity_details(self.current_data)
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("VEHICLE AGE + VALIDITY")
+        dialog.configure(bg=BG)
+        dialog.geometry("820x680")
+        dialog.minsize(620, 500)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        header = tk.Frame(
+            dialog, bg=BG2, height=62,
+            highlightbackground=BORDER, highlightthickness=1
+        )
+        header.pack(fill="x", padx=10, pady=(10, 6))
+        header.pack_propagate(False)
+
+        tk.Label(
+            header, text="⌛  VEHICLE AGE + VALIDITY",
+            fg=CYAN, bg=BG2, font=(MONO, 12, "bold")
+        ).pack(side="left", padx=14)
+
+        tk.Label(
+            header, text=self.current_rc,
+            fg=NEON, bg=BG2, font=(MONO, 10, "bold")
+        ).pack(side="right", padx=14)
+
+        body = tk.Frame(
+            dialog, bg=PANEL,
+            highlightbackground=BORDER2, highlightthickness=1
+        )
+        body.pack(fill="both", expand=True, padx=10, pady=6)
+
+        canvas = tk.Canvas(body, bg=BLACK, highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True, padx=8, pady=8)
+        scrollbar = tk.Scrollbar(body, command=canvas.yview)
+        scrollbar.pack(side="right", fill="y", pady=8)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        inner = tk.Frame(canvas, bg=BLACK)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(window, width=e.width)
+        )
+        canvas.bind(
+            "<MouseWheel>",
+            lambda e: canvas.yview_scroll(
+                -3 if e.delta > 0 else 3, "units"
+            )
+        )
+        canvas.bind(
+            "<Button-4>",
+            lambda e: canvas.yview_scroll(-3, "units")
+        )
+        canvas.bind(
+            "<Button-5>",
+            lambda e: canvas.yview_scroll(3, "units")
+        )
+
+        def row(label, value, color=WHITE):
+            r = tk.Frame(
+                inner, bg=CARD,
+                highlightbackground=BORDER2, highlightthickness=1
+            )
+            r.pack(fill="x", padx=12, pady=3)
+            tk.Label(
+                r, text=label, fg=NEON, bg=CARD,
+                font=(MONO, 8, "bold"), width=23, anchor="w"
+            ).pack(side="left", padx=10, pady=9)
+            tk.Label(
+                r, text=stringify(value), fg=color, bg=CARD,
+                font=(MONO, 9, "bold"), anchor="w",
+                justify="left", wraplength=500
+            ).pack(side="left", fill="x", expand=True, padx=8, pady=9)
+
+        row("VEHICLE NUMBER", self.current_rc, NEON)
+        row("REGISTERED SINCE", report["registration"])
+        row("PURCHASE / DELIVERY", report["purchase"])
+        row("VEHICLE AGE", report["age"], CYAN)
+        row("AGE REVIEW", report["age_review"], YELLOW if "OVER 15" in report["age_review"] else NEON)
+
+        tk.Label(
+            inner, text="CURRENT VALIDITY",
+            fg=NEON, bg=BLACK, font=(MONO, 9, "bold")
+        ).pack(anchor="w", padx=14, pady=(14, 6))
+
+        for label, state in report["fields"]:
+            color = NEON if state == "ACTIVE" else (RED if state == "EXPIRED" else YELLOW)
+            row(label, state, color)
+
+        row(
+            "HEALTH SCORE",
+            f"{report['score']} / 100" if report["score"] is not None else "N/A",
+            NEON if report["score"] is not None and report["score"] >= 80 else YELLOW
+        )
+        row("OVERALL STATUS", report["overall"], report["overall_color"])
+
+        tk.Label(
+            inner,
+            text=(
+                "AGE IS AN INFORMATIONAL CALCULATION. "
+                "LEGAL RENEWAL / FITNESS LIMITS DEPEND ON VEHICLE CATEGORY "
+                "AND APPLICABLE RTO RULES."
+            ),
+            fg=MUTED, bg=BLACK, font=(MONO, 7),
+            justify="left", wraplength=700
+        ).pack(fill="x", padx=14, pady=(12, 14))
+
+        footer = tk.Frame(dialog, bg=BG)
+        footer.pack(fill="x", padx=10, pady=(6, 10))
+        tk.Button(
+            footer, text="CLOSE", command=dialog.destroy,
+            bg="#071a0d", fg=NEON,
+            activebackground=NEON, activeforeground=BLACK,
+            font=(MONO, 8, "bold"), relief="flat", bd=1,
+            padx=18, pady=7, cursor="hand2"
+        ).pack(side="right")
+
+        self.center_toplevel(dialog)
 
     def plate_intelligence(self, rc):
         rc = re.sub(r"[\s-]+", "", rc.upper())
@@ -2941,69 +3257,441 @@ class VehicleInformationApp:
                 accent=YELLOW
             )
 
+    def ensure_report_server(self):
+        """Start a tiny local HTTP server once so phones can open QR reports."""
+        if self.report_server is not None and self.report_server_thread is not None:
+            if self.report_server_thread.is_alive():
+                return self.report_server_port
+
+        results_dir = os.path.abspath("results")
+        handler = lambda *args, **kwargs: ReportRequestHandler(
+            *args, directory=results_dir, **kwargs
+        )
+
+        try:
+            self.report_server = ReportHTTPServer(("0.0.0.0", 0), handler)
+            self.report_server_port = self.report_server.server_address[1]
+            self.report_server_thread = threading.Thread(
+                target=self.report_server.serve_forever,
+                daemon=True
+            )
+            self.report_server_thread.start()
+            log(
+                f"[REPORT SERVER] Started on "
+                f"0.0.0.0:{self.report_server_port}"
+            )
+            return self.report_server_port
+        except Exception as error:
+            self.report_server = None
+            self.report_server_thread = None
+            self.report_server_port = None
+            log(f"[REPORT SERVER] Start failed: {error}")
+            return None
+
+    def report_rows(self):
+        """Return exactly the data representation shown by the dashboard."""
+        rows = [
+            ("VEHICLE NUMBER", self.current_rc),
+            ("MAKER MODEL", self.find_value(self.current_data, "maker model")),
+            ("MODEL NAME", self.find_value(self.current_data, "model name")),
+            ("FUEL TYPE", self.find_value(self.current_data, "fuel type")),
+            ("FUEL NORMS", self.find_value(self.current_data, "fuel norms")),
+            ("ADDRESS", self.mask_sensitive_value(
+                "address", self.find_value(self.current_data, "address")
+            )),
+            ("CITY", self.find_value(self.current_data, "city name", "city")),
+            ("REGISTERED RTO", self.find_value(
+                self.current_data, "registered rto", "rto name"
+            )),
+            ("RTO CODE", self.find_value(self.current_data, "rto code")),
+            ("STATE", self.find_value(self.current_data, "state")),
+            ("REGISTRATION DATE", self.find_value(
+                self.current_data, "registration date"
+            )),
+            ("PURCHASE / DELIVERY", self.find_value(
+                self.current_data,
+                "purchase date", "date of purchase", "purchase",
+                "delivery date", "delivery"
+            )),
+            ("INSURANCE COMPANY", self.find_value(
+                self.current_data, "insurance company"
+            )),
+            ("INSURANCE NO", self.find_value(
+                self.current_data, "insurance no", "insurance number"
+            )),
+            ("INSURANCE UPTO", self.find_value(
+                self.current_data, "insurance upto", "insurance expiry"
+            )),
+            ("PUC NO", self.find_value(
+                self.current_data, "puc no", "puc number"
+            )),
+            ("PUC UPTO", self.find_value(self.current_data, "puc upto")),
+            ("FITNESS UPTO", self.find_value(
+                self.current_data, "fitness upto"
+            )),
+            ("TAX UPTO", self.find_value(self.current_data, "tax upto")),
+            ("OWNER NAME", self.mask_sensitive_value(
+                "owner name", self.find_value(self.current_data, "owner name")
+            )),
+            ("OWNER SERIAL NO", self.mask_sensitive_value(
+                "owner serial no",
+                self.find_value(
+                    self.current_data,
+                    "owner serial no", "owner serial number"
+                )
+            )),
+            ("PHONE", self.mask_sensitive_value(
+                "phone", self.find_value(
+                    self.current_data, "phone", "mobile"
+                )
+            )),
+        ]
+
+        known = {normalize_key(label) for label, _ in rows}
+        for key, value in self.current_data.items():
+            if normalize_key(key) not in known:
+                rows.append(
+                    (key.upper(), self.mask_sensitive_value(key, value))
+                )
+        return rows
+
+    def build_html_report(self, html_path):
+        rows = self.report_rows()
+        report = self.age_validity_details(self.current_data)
+        score = report["score"]
+        score_text = f"{score} / 100" if score is not None else "N/A"
+
+        table_rows = []
+        for label, value in rows:
+            table_rows.append(
+                "<tr><th>{}</th><td>{}</td></tr>".format(
+                    html.escape(str(label)),
+                    html.escape(stringify(value)).replace("\n", "<br>")
+                )
+            )
+
+        validity_rows = []
+        for label, state in report["fields"]:
+            validity_rows.append(
+                "<tr><th>{}</th><td class='{}'>{}</td></tr>".format(
+                    html.escape(label),
+                    "good" if state == "ACTIVE"
+                    else "bad" if state == "EXPIRED"
+                    else "warn",
+                    html.escape(state)
+                )
+            )
+
+        css = """
+        :root { color-scheme: dark; }
+        body {
+            margin:0; background:#020504; color:#e7f4eb;
+            font-family:Arial, sans-serif;
+        }
+        .wrap { max-width:1000px; margin:auto; padding:24px; }
+        .header {
+            border:1px solid #087b42; background:#050b08;
+            padding:18px; margin-bottom:14px;
+        }
+        h1 { color:#00ff66; margin:0 0 6px; font-size:24px; }
+        h2 { color:#00ff66; font-size:15px; }
+        .sub { color:#789184; }
+        .card {
+            border:1px solid #0d4e2e; background:#06100b;
+            padding:14px; margin:12px 0;
+        }
+        table { width:100%; border-collapse:collapse; }
+        th,td {
+            border:1px solid #0d4e2e; padding:9px;
+            text-align:left; vertical-align:top;
+        }
+        th { width:30%; color:#00ff66; background:#07130c; }
+        .good { color:#00ff66; font-weight:bold; }
+        .bad { color:#ff3158; font-weight:bold; }
+        .warn { color:#ffd84d; font-weight:bold; }
+        a.button {
+            display:inline-block; padding:10px 15px; margin:4px 6px 4px 0;
+            border:1px solid #00ff66; color:#00ff66;
+            text-decoration:none; background:#041c0e;
+        }
+        .note { color:#789184; font-size:12px; }
+        """
+        body = f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vehicle Report - {html.escape(self.current_rc)}</title>
+<style>{css}</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <h1>VEHICLE INFORMATION REPORT</h1>
+    <div class="sub">VEHICLE: {html.escape(self.current_rc)}</div>
+    <div class="sub">GENERATED: {html.escape(str(datetime.now()))}</div>
+  </div>
+
+  <div class="card">
+    <h2>VEHICLE AGE + VALIDITY</h2>
+    <table>
+      <tr><th>REGISTERED SINCE</th><td>{html.escape(report["registration"])}</td></tr>
+      <tr><th>PURCHASE / DELIVERY</th><td>{html.escape(report["purchase"])}</td></tr>
+      <tr><th>VEHICLE AGE</th><td>{html.escape(report["age"])}</td></tr>
+      <tr><th>AGE REVIEW</th><td class="warn">{html.escape(report["age_review"])}</td></tr>
+      <tr><th>HEALTH SCORE</th><td>{html.escape(score_text)}</td></tr>
+      <tr><th>OVERALL STATUS</th><td class="{ 'good' if report['overall_color'] == NEON else 'bad' if report['overall_color'] == RED else 'warn' }">{html.escape(report["overall"])}</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>CURRENT VALIDITY</h2>
+    <table>{''.join(validity_rows)}</table>
+  </div>
+
+  <div class="card">
+    <h2>ALL DISPLAYED VEHICLE DATA</h2>
+    <table>{''.join(table_rows)}</table>
+  </div>
+
+  <div class="card">
+    <a class="button" href="{html.escape(self.current_rc)}_report.pdf">OPEN / DOWNLOAD PDF</a>
+  </div>
+
+  <div class="note">
+    Educational &amp; Ethical Use Only. Vehicle image is a model reference.
+    Age is informational; legal renewal/fitness rules depend on vehicle category
+    and applicable RTO rules.
+  </div>
+</div>
+</body>
+</html>"""
+        with open(html_path, "w", encoding="utf-8") as file:
+            file.write(body)
+
+    def build_pdf_report(self, pdf_path):
+        if not REPORTLAB_AVAILABLE:
+            raise RuntimeError(
+                "ReportLab is not installed. Run: pip install reportlab"
+            )
+
+        rows = self.report_rows()
+        report = self.age_validity_details(self.current_data)
+        score_text = f"{report['score']} / 100" if report["score"] is not None else "N/A"
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "CyberTitle", parent=styles["Title"],
+            fontName="Helvetica-Bold", fontSize=18,
+            textColor=pdf_colors.HexColor("#00aa55"),
+            spaceAfter=12
+        )
+        heading_style = ParagraphStyle(
+            "CyberHeading", parent=styles["Heading2"],
+            fontName="Helvetica-Bold", fontSize=11,
+            textColor=pdf_colors.HexColor("#007a3d"),
+            spaceBefore=10, spaceAfter=7
+        )
+        normal_style = ParagraphStyle(
+            "CyberNormal", parent=styles["BodyText"],
+            fontName="Helvetica", fontSize=8.5,
+            leading=11
+        )
+
+        doc = SimpleDocTemplate(
+            pdf_path, pagesize=A4,
+            rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30
+        )
+        story = [
+            Paragraph("VEHICLE INFORMATION REPORT", title_style),
+            Paragraph(
+                f"<b>VEHICLE:</b> {html.escape(self.current_rc)}<br/>"
+                f"<b>GENERATED:</b> {html.escape(str(datetime.now()))}",
+                normal_style
+            ),
+            Spacer(1, 10),
+            Paragraph("VEHICLE AGE + VALIDITY", heading_style)
+        ]
+
+        age_table = [
+            ["REGISTERED SINCE", report["registration"]],
+            ["PURCHASE / DELIVERY", report["purchase"]],
+            ["VEHICLE AGE", report["age"]],
+            ["AGE REVIEW", report["age_review"]],
+            ["HEALTH SCORE", score_text],
+            ["OVERALL STATUS", report["overall"]],
+        ]
+        table = Table(age_table, colWidths=[145, 385])
+        table.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), 0.5, pdf_colors.HexColor("#5c8f70")),
+            ("BACKGROUND", (0,0), (0,-1), pdf_colors.HexColor("#e8f5ec")),
+            ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ]))
+        story.extend([table, Spacer(1, 10), Paragraph("CURRENT VALIDITY", heading_style)])
+
+        validity_table = [["CHECK", "STATUS"]] + [
+            [label, state] for label, state in report["fields"]
+        ]
+        table = Table(validity_table, colWidths=[145, 385])
+        table.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), 0.5, pdf_colors.HexColor("#5c8f70")),
+            ("BACKGROUND", (0,0), (-1,0), pdf_colors.HexColor("#dcefe3")),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ]))
+        story.extend([table, Spacer(1, 10), Paragraph("ALL DISPLAYED VEHICLE DATA", heading_style)])
+
+        data_table = [["FIELD", "VALUE"]]
+        for label, value in rows:
+            data_table.append([str(label), stringify(value)])
+        table = Table(data_table, colWidths=[145, 385], repeatRows=1)
+        table.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), 0.4, pdf_colors.HexColor("#8aa895")),
+            ("BACKGROUND", (0,0), (-1,0), pdf_colors.HexColor("#dcefe3")),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 7.5),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("WORDWRAP", (0,0), (-1,-1), True),
+        ]))
+        story.extend([
+            table, Spacer(1, 12),
+            Paragraph(
+                "Educational & Ethical Use Only. Vehicle image is a model reference. "
+                "Age is informational; legal renewal/fitness rules depend on vehicle "
+                "category and applicable RTO rules.",
+                normal_style
+            )
+        ])
+        doc.build(story)
+
     def generate_qr_report(self):
         if not self.current_data:
-            self.show_dialog("NO DATA", "Perform a vehicle lookup first.", accent=YELLOW)
+            self.show_dialog(
+                "NO DATA", "Perform a vehicle lookup first.", accent=YELLOW
+            )
             return
         if not QRCODE_AVAILABLE or not PIL_AVAILABLE:
             self.show_dialog(
                 "QR MODULE NOT INSTALLED",
-                "Install the free qrcode package with:\n\npip install qrcode[pil]",
+                "Install the free QR dependencies with:\n\n"
+                "pip install qrcode[pil] pillow",
                 accent=YELLOW
             )
             return
 
-        summary = [
-            "VEHICLE INFORMATION REPORT",
-            f"VEHICLE: {self.current_rc}",
-            f"MAKER/MODEL: {self.find_value(self.current_data, 'maker model', 'model', 'vehicle model')}",
-            f"FUEL: {self.find_value(self.current_data, 'fuel type')}",
-            f"RTO: {self.find_value(self.current_data, 'rto code')} / {self.find_value(self.current_data, 'rto name', 'registered rto')}",
-            f"REGISTRATION DATE: {self.find_value(self.current_data, 'registration date')}",
-            f"VEHICLE AGE: {self.vehicle_age_text(self.current_data)}",
-        ]
-        score, checks = self.calculate_health_score(self.current_data)
-        summary.append(f"HEALTH SCORE: {score if score is not None else 'N/A'} / 100")
-        summary.append("VALIDITY: " + ", ".join(checks))
-        summary.append("\nEducational & Ethical Use Only.")
-        payload = "\n".join(summary)
+        ensure_dirs()
 
         try:
-            ensure_dirs()
+            html_path = os.path.abspath(
+                f"results/{self.current_rc}_report.html"
+            )
+            pdf_path = os.path.abspath(
+                f"results/{self.current_rc}_report.pdf"
+            )
+
+            self.build_pdf_report(pdf_path)
+            self.build_html_report(html_path)
+
+            port = self.ensure_report_server()
+            if not port:
+                raise RuntimeError(
+                    "Could not start the local report server."
+                )
+
+            host = get_local_ip()
+            report_url = (
+                f"http://{host}:{port}/"
+                f"{quote(os.path.basename(html_path))}"
+            )
+
             qr_path = f"results/{self.current_rc}_qr.png"
-            img = qrcode.make(payload)
-            img.save(qr_path)
+            qrcode.make(report_url).save(qr_path)
 
             dialog = tk.Toplevel(self.root)
             dialog.title("QR CODE REPORT")
             dialog.configure(bg=BG)
-            dialog.geometry("520x650")
-            dialog.minsize(420, 560)
+            dialog.geometry("620x720")
+            dialog.minsize(520, 620)
             dialog.transient(self.root)
             dialog.grab_set()
 
-            header = tk.Frame(dialog, bg=BG2, height=60, highlightbackground=BORDER, highlightthickness=1)
+            header = tk.Frame(
+                dialog, bg=BG2, height=60,
+                highlightbackground=BORDER, highlightthickness=1
+            )
             header.pack(fill="x", padx=10, pady=(10, 6))
             header.pack_propagate(False)
-            tk.Label(header, text="▣  QR CODE REPORT", fg=NEON, bg=BG2, font=(MONO, 12, "bold")).pack(side="left", padx=14)
 
-            body = tk.Frame(dialog, bg=PANEL, highlightbackground=BORDER2, highlightthickness=1)
+            tk.Label(
+                header, text="▣  QR CODE REPORT",
+                fg=NEON, bg=BG2, font=(MONO, 12, "bold")
+            ).pack(side="left", padx=14)
+
+            body = tk.Frame(
+                dialog, bg=PANEL,
+                highlightbackground=BORDER2, highlightthickness=1
+            )
             body.pack(fill="both", expand=True, padx=10, pady=6)
+
             with Image.open(qr_path) as qr_img:
                 qr_img = qr_img.convert("RGB")
-                qr_img.thumbnail((400, 400), Image.Resampling.LANCZOS)
+                qr_img.thumbnail((430, 430), Image.Resampling.LANCZOS)
                 photo = ImageTk.PhotoImage(qr_img)
+
             label = tk.Label(body, image=photo, bg="white")
             label.image = photo
-            label.pack(pady=18)
-            tk.Label(body, text=f"SCAN FOR {self.current_rc} REPORT DATA", fg=NEON, bg=PANEL, font=(MONO, 8, "bold")).pack()
-            tk.Label(body, text="Sensitive personal fields are intentionally protected.", fg=MUTED, bg=PANEL, font=(MONO, 7)).pack(pady=(4, 10))
+            label.pack(pady=14)
+
+            tk.Label(
+                body,
+                text=f"SCAN → FULL DATA REPORT  //  {self.current_rc}",
+                fg=NEON, bg=PANEL, font=(MONO, 8, "bold")
+            ).pack()
+
+            tk.Label(
+                body,
+                text=(
+                    "Phone and laptop must be on the same Wi-Fi/network.\n"
+                    "Scan opens the full report page + PDF download."
+                ),
+                fg=MUTED, bg=PANEL, font=(MONO, 7),
+                justify="center"
+            ).pack(pady=(5, 8))
+
+            url_label = tk.Label(
+                body,
+                text=report_url,
+                fg=CYAN, bg=PANEL,
+                font=(MONO, 7),
+                wraplength=540,
+                justify="center"
+            )
+            url_label.pack(pady=(0, 8))
 
             footer = tk.Frame(dialog, bg=BG)
             footer.pack(fill="x", padx=10, pady=(6, 10))
-            tk.Button(footer, text="CLOSE", command=dialog.destroy, bg="#071a0d", fg=NEON, activebackground=NEON, activeforeground=BLACK, font=(MONO, 8, "bold"), relief="flat", bd=1, padx=18, pady=7).pack(side="right")
+
+            tk.Button(
+                footer, text="CLOSE", command=dialog.destroy,
+                bg="#071a0d", fg=NEON,
+                activebackground=NEON, activeforeground=BLACK,
+                font=(MONO, 8, "bold"), relief="flat", bd=1,
+                padx=18, pady=7, cursor="hand2"
+            ).pack(side="right")
+
             self.center_toplevel(dialog)
-            self.telemetry_log(f"[QR] Report generated: {qr_path}\n")
+            self.telemetry_log(
+                f"[QR] Full report generated.\n"
+                f"[QR] HTML: {html_path}\n"
+                f"[QR] PDF: {pdf_path}\n"
+                f"[QR] URL: {report_url}\n"
+            )
+
         except Exception as error:
             log(f"QR generation error: {error}")
             self.show_dialog("QR ERROR", str(error), accent=RED)
@@ -3253,6 +3941,18 @@ class VehicleInformationApp:
             error,
             accent=RED
         )
+
+    def close_application(self):
+        try:
+            if self.report_server is not None:
+                self.report_server.shutdown()
+                self.report_server.server_close()
+        except Exception as error:
+            log(f"Report server shutdown error: {error}")
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def update_clock(self):
         # Kept as a lightweight 1-second timer.
