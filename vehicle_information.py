@@ -2607,19 +2607,62 @@ class VehicleInformationApp:
         return {"state": state, "rto": rto, "series": series or "--", "number": number, "normalized": rc}
 
     def mask_sensitive_value(self, key, value):
+        """
+        Keep useful vehicle information visible without unmasking private
+        third-party personal data.
+        """
         key = normalize_key(key)
         value = stringify(value)
-        sensitive = ("owner name", "phone", "mobile", "address", "owner serial")
-        if any(token in key for token in sensitive) and value != "N/A":
-            if "phone" in key or "mobile" in key:
-                digits = re.sub(r"\D", "", value)
-                return ("*" * max(0, len(digits) - 4)) + digits[-4:] if digits else "[PROTECTED]"
-            if "address" in key:
-                return "[PROTECTED PERSONAL ADDRESS]"
-            if "owner serial" in key:
+
+        if value == "N/A":
+            return value
+
+        if "owner serial" in key:
+            return "[PROTECTED]"
+
+        if "phone" in key or "mobile" in key:
+            if "*" in value or "x" in value.lower():
+                return value
+            digits = re.sub(r"\D", "", value)
+            if not digits:
                 return "[PROTECTED]"
-            parts = value.split()
-            return (parts[0][0] + "***") if parts else "[PROTECTED]"
+            return ("*" * max(0, len(digits) - 4)) + digits[-4:]
+
+        if "owner name" in key:
+            parts = [part for part in re.split(r"\s+", value.strip()) if part]
+            if not parts:
+                return "[PROTECTED]"
+            masked = []
+            for part in parts:
+                if len(part) <= 1:
+                    masked.append(part)
+                elif len(part) == 2:
+                    masked.append(part[0] + "*")
+                else:
+                    masked.append(part[0] + "*" * (len(part) - 1))
+            return " ".join(masked)
+
+        if "address" in key:
+            if "*" in value or "x" in value.lower():
+                return value
+
+            parts = [p.strip() for p in re.split(r"[,;|]+", value) if p.strip()]
+            if not parts:
+                return "N/A"
+
+            broad_parts = []
+            private_markers = (
+                "house", "flat", "plot", "sector", "block", "street",
+                "gali", "lane", "road no", "h.no", "house no", "door no"
+            )
+            for part in parts:
+                low = part.lower()
+                if any(marker in low for marker in private_markers):
+                    continue
+                broad_parts.append(part)
+
+            return ", ".join(broad_parts[-4:]) if broad_parts else "[LOCATION PROTECTED]"
+
         return value
 
     def populate_vehicle_data(self, data):
